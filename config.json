@@ -1,0 +1,4 @@
+{
+    "rpc_endpoint": "ws://35.203.93.221:26657/websocket",
+    "api_endpoint": "http://34.165.238.45:1317/"
+}

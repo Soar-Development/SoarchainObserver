@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package blockchain;
+
+option go_package = "github.com/Soar-Robotics/SoarchainObserver/internal/blockchain/types";
+
+message Transaction {
+  string tx_id = 1;
+  string type = 2;
+  string data = 3;
+}
+
+message Block {
+  string block_id = 1;
+  repeated Transaction transactions = 2;
+}
+
+message BlockMessage {
+  Block block = 1;
+}
