@@ -4,15 +4,46 @@ package blockchain;
 
 option go_package = "github.com/Soar-Robotics/SoarchainObserver/internal/blockchain/types";
 
+message ClientData {
+  string address = 1;
+  string pubkey = 2;
+  int64 earnings = 3;
+}
+
+message RunnerData {
+  string address = 1;
+  string pubkey = 2;
+  int64 earnings = 3;
+}
+
+message ChallengerData {
+  string address = 1;
+  string pubkey = 2;
+  int64 earnings = 3;
+}
+
+message RunnerChallengeTransaction {
+  string tx_id = 1;
+  string timestamp = 2;
+  RunnerData runner = 3;
+  ChallengerData challenger = 4;
+  repeated ClientData clients = 5;
+}
+
 message Transaction {
   string tx_id = 1;
   string type = 2;
-  string data = 3;
+  oneof transaction_data {
+    string raw_data = 3;
+    RunnerChallengeTransaction runner_challenge_tx = 4;
+    // Add other transaction types here
+  }
 }
 
 message Block {
   string block_id = 1;
-  repeated Transaction transactions = 2;
+  string timestamp = 2;
+  repeated Transaction transactions = 3;
 }
 
 message BlockMessage {
