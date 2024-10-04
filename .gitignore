@@ -1,0 +1,26 @@
+# Ignore 
+.env
+*.log
+*.tmp
+*.out
+*.exe
+*.dll
+*.so
+*.dylib
+*.swp
+*.swo
+*.bak
+*.old
+*.orig
+*.rej
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+node_modules/
+vendor/
+coverage/
+dist/
+build/
