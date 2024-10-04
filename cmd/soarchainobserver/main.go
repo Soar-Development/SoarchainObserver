@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,21 +15,38 @@ import (
 	"github.com/Soar-Robotics/SoarchainObserver/internal/models"
 	"github.com/Soar-Robotics/SoarchainObserver/internal/utils"
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 func main() {
 	logger := utils.GetLogger()
-
+	gin.SetMode(gin.ReleaseMode)
 	// Load configuration
 	config, err := config.LoadConfig("config.json")
 	if err != nil {
 		logger.Fatalf("Failed to load config: %v", err)
 	}
 
+	// Load environment variables from .env file
+	envErr := godotenv.Load()
+	if envErr != nil {
+		log.Fatalf("Error loading .env file")
+	}
+
+	// Read database credentials from environment variables
+	dbHost := os.Getenv("DB_HOST")
+	dbPort := os.Getenv("DB_PORT")
+	dbUser := os.Getenv("DB_USER")
+	dbPassword := os.Getenv("DB_PASSWORD")
+	dbName := os.Getenv("DB_NAME")
+	dsn := fmt.Sprintf(
+		"host=%s user=%s password=%s dbname=%s port=%s sslmode=disable",
+		dbHost, dbUser, dbPassword, dbName, dbPort,
+	)
+
 	// Initialize database connection
-	dsn := "host=localhost user=alp password=Alp.py1320 dbname=observer port=5432 sslmode=disable"
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		logger.Fatalf("Failed to connect to database: %v", err)
@@ -41,12 +60,6 @@ func main() {
 	sqlDB.SetMaxOpenConns(25)
 	sqlDB.SetMaxIdleConns(25)
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
-
-	// Migrate the schema
-	err = db.AutoMigrate(&models.Client{}, &models.ClientEarning{})
-	if err != nil {
-		logger.Fatalf("Failed to migrate database schema: %v", err)
-	}
 
 	// Initialize the BlockReader with the database connection
 	blockReader, err := blockchain.NewBlockReader(config.RPCEndpoint, db)
