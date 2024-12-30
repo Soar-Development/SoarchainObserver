@@ -1,4 +1,4 @@
 {
-    "rpc_endpoint": "ws://104.248.131.15:26657/websocket",
-    "api_endpoint": "http://104.248.131.15:1317/"
+    "rpc_endpoint": "wss://rpc2.mainnet.soarchain.com/websocket",
+    "api_endpoint": "http://104.248.131.15:1317"
 }
