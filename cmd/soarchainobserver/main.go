@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -64,7 +65,11 @@ func main() {
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
 
 	// Migrate the schema
-	if err := db.AutoMigrate(&models.Client{}, &models.ClientEarning{}); err != nil {
+	if err := db.AutoMigrate(
+		&models.Client{},
+		&models.ClientEarning{},
+		&models.EpochEarnings{},
+	); err != nil {
 		logger.Fatalf("Failed to migrate database schema: %v", err)
 	}
 
@@ -154,15 +159,25 @@ func GetMinerStatus(c *gin.Context) {
 		return
 	}
 
-	// 1) Find the most recent "challenge" from your ClientEarning table
-	lastChallengeTime, err := fetchLastChallengeTime(db, solanaWallet)
+	// Directly look up the Client record
+	var client models.Client
+	err := db.Where("solana_address = ?", solanaWallet).First(&client).Error
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusOK, gin.H{
+				"status": "Down",
+				"issues": []string{"Offline"},
+				"logs":   gin.H{"lastSeen": nil},
+			})
+			return
+		}
+		// Other DB error
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 2) If no record found => consider it "Down"
-	if lastChallengeTime.IsZero() {
+	// If lastChallengeTime is zero => never challenged
+	if client.LastChallengeTime.IsZero() {
 		c.JSON(http.StatusOK, gin.H{
 			"status": "Down",
 			"issues": []string{"Offline"},
@@ -171,30 +186,27 @@ func GetMinerStatus(c *gin.Context) {
 		return
 	}
 
-	// 3) Compare with current time
+	// Evaluate difference in minutes
 	now := time.Now().UTC()
-	diffMins := now.Sub(lastChallengeTime).Minutes()
+	diffMins := now.Sub(client.LastChallengeTime).Minutes()
 
 	var status string
 	var issues []string
-
 	switch {
 	case diffMins <= 2:
 		status = "Up"
 	case diffMins > 2 && diffMins < 5:
-		status = "Degraded"
-		issues = append(issues, "HighLatency")
+		status = "immobile"
+		issues = append(issues, "Latency")
 	default:
 		status = "Down"
 		issues = append(issues, "Offline")
 	}
 
-	// 4) Build logs
 	logs := gin.H{
-		"lastSeen": lastChallengeTime.Format(time.RFC3339),
+		"lastSeen": client.LastChallengeTime.Format(time.RFC3339),
 		"diffMins": diffMins,
 	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"status": status,
 		"issues": issues,
@@ -202,90 +214,53 @@ func GetMinerStatus(c *gin.Context) {
 	})
 }
 
-// fetchLastChallengeTime finds the newest (latest) `Timestamp` in ClientEarning
-// for the given solanaWallet (which is presumably stored in `client_address`).
-func fetchLastChallengeTime(db *gorm.DB, solanaWallet string) (time.Time, error) {
-	var earning models.ClientEarning
-
-	err := db.Where("client_address = ?", solanaWallet).
-		Order("timestamp DESC").
-		First(&earning).Error
-
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// no challenge found
-			return time.Time{}, nil
-		}
-		return time.Time{}, err
-	}
-	return earning.Timestamp, nil
-}
-
 // ---------------------------------------------------------------------
 // 2) /api/v1/miner/latest-rewards
 // ---------------------------------------------------------------------
 
-// GetLatestRewards handles GET /api/v1/miner/latest-rewards?wallet=<SOLANA_WALLET>
-// Returns daily aggregated data for the last 7 days (or `ndays` if you change the code).
+// GetLatestRewards handles GET /api/v1/miner/latest-rewards?wallet=<SOLANA_WALLET>&limit=7
+// Returns up to 'limit' latest epoch records in descending order of epoch_number.
 func GetLatestRewards(c *gin.Context) {
 	db := c.MustGet("db").(*gorm.DB)
-	solanaWallet := c.Query("wallet")
-	if solanaWallet == "" {
+	wallet := c.Query("wallet")
+	if wallet == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing 'wallet' query param"})
 		return
 	}
 
-	rewards, err := fetchRewardsForLastNDays(db, solanaWallet, 7)
+	// Default limit to 7 if not provided
+	limitStr := c.Query("limit")
+	if limitStr == "" {
+		limitStr = "7"
+	}
+	limitVal, err := strconv.Atoi(limitStr)
+	if err != nil {
+		limitVal = 7
+	}
+
+	var epochs []models.EpochEarnings
+	err = db.Where("client_address = ?", wallet).
+		Order("epoch_number DESC").
+		Limit(limitVal).
+		Find(&epochs).Error
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, rewards)
-}
-
-// fetchRewardsForLastNDays aggregates by day (DATE(timestamp)) for the last `ndays` days.
-func fetchRewardsForLastNDays(db *gorm.DB, solanaWallet string, ndays int) ([]map[string]interface{}, error) {
-	type DailyAggregate struct {
-		Day           time.Time `gorm:"column:day"`
-		DailyEarnings int64     `gorm:"column:daily_earnings"`
-	}
-
-	// We'll look from `ndays` days ago up to now
-	now := time.Now().UTC()
-	cutoffDate := now.AddDate(0, 0, -ndays).Format("2006-01-02") // e.g. "2024-09-25"
-
-	var aggregated []DailyAggregate
-
-	// We GROUP BY date, summing earnings. Then only keep days >= cutoffDate.
-	query := `
-        SELECT DATE("timestamp") AS day,
-               SUM(earnings)     AS daily_earnings
-        FROM client_earnings
-        WHERE client_address = ?
-          AND DATE("timestamp") >= DATE(?)
-        GROUP BY DATE("timestamp")
-        ORDER BY DATE("timestamp") DESC
-    `
-	if err := db.Raw(query, solanaWallet, cutoffDate).Scan(&aggregated).Error; err != nil {
-		return nil, err
-	}
-
-	var results []map[string]interface{}
-	for _, row := range aggregated {
-		// Example: if you store "earnings" as integer micro-something,
-		// you might convert to float. e.g. float64(row.DailyEarnings)/1e6
+	// Build JSON response
+	results := make([]map[string]interface{}, 0, len(epochs))
+	for _, e := range epochs {
 		results = append(results, map[string]interface{}{
-			"date":        row.Day.Format("2006-01-02"),
-			"amount":      float64(row.DailyEarnings) / 1000000.0,
-			"tokenSymbol": "SOAR",
+			"epochNumber":   e.EpochNumber,
+			"startTime":     e.StartTime.Format(time.RFC3339),
+			"endTime":       e.EndTime.Format(time.RFC3339),
+			"totalEarnings": float64(e.TotalEarnings) / 1e6, // if micro-based
+			"tokenSymbol":   "SOAR",
 		})
 	}
 
-	// If you'd like to ensure EXACTLY `ndays` entries, you can fill missing days or slice.
-	// For now, we just return the days we have.
-
-	return results, nil
+	c.JSON(http.StatusOK, results)
 }
 
 // ---------------------------------------------------------------------
@@ -296,53 +271,31 @@ func fetchRewardsForLastNDays(db *gorm.DB, solanaWallet string, ndays int) ([]ma
 // It returns *daily aggregated* earnings for each calendar day.
 func GetAllRewards(c *gin.Context) {
 	db := c.MustGet("db").(*gorm.DB)
-	solanaWallet := c.Query("wallet")
-	if solanaWallet == "" {
+	wallet := c.Query("wallet")
+	if wallet == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing 'wallet' query param"})
 		return
 	}
 
-	allRewards, err := fetchAllRewards(db, solanaWallet)
-	if err != nil {
+	var epochs []models.EpochEarnings
+	if err := db.Where("client_address = ?", wallet).
+		Order("epoch_number ASC").
+		Find(&epochs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, allRewards)
-}
-
-// fetchAllRewards queries the entire ClientEarning history for a given wallet,
-// but aggregates results by day (1 row per day).
-func fetchAllRewards(db *gorm.DB, solanaWallet string) ([]map[string]interface{}, error) {
-	type DailyAggregate struct {
-		Day           time.Time `gorm:"column:day"`
-		DailyEarnings int64     `gorm:"column:daily_earnings"`
-	}
-
-	var aggregated []DailyAggregate
-
-	// GROUP BY date to get daily sums
-	query := `
-        SELECT DATE("timestamp") AS day,
-               SUM(earnings)     AS daily_earnings
-        FROM client_earnings
-        WHERE client_address = ?
-        GROUP BY DATE("timestamp")
-        ORDER BY DATE("timestamp") ASC
-    `
-	if err := db.Raw(query, solanaWallet).Scan(&aggregated).Error; err != nil {
-		return nil, err
-	}
-
-	var results []map[string]interface{}
-	for _, row := range aggregated {
+	results := make([]map[string]interface{}, 0, len(epochs))
+	for _, e := range epochs {
 		results = append(results, map[string]interface{}{
-			"date":        row.Day.Format("2006-01-02"),
-			"amount":      float64(row.DailyEarnings) / 1000000.0,
-			"tokenSymbol": "SOAR",
+			"epochNumber":   e.EpochNumber,
+			"startTime":     e.StartTime.Format(time.RFC3339),
+			"endTime":       e.EndTime.Format(time.RFC3339),
+			"totalEarnings": float64(e.TotalEarnings) / 1e6, // if micro-based
+			"tokenSymbol":   "SOAR",
 		})
 	}
-	return results, nil
+	c.JSON(http.StatusOK, results)
 }
 
 // ---------------------------------------------------------------------
