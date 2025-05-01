@@ -109,7 +109,7 @@ func (br *BlockReader) handleReconnection(logger *log.Logger) {
 func getCurrentEpoch() (EpochInfo, error) {
 	var epochInfo EpochInfo
 
-	resp, err := http.Get("https://api.mainnet.soarchain.com/soarchain/epoch/day")
+	resp, err := http.Get("https://rpc2.mainnet.soarchain.com/api/soarchain/epoch/day")
 	if err != nil {
 		return epochInfo, fmt.Errorf("failed to fetch epoch info: %w", err)
 	}
